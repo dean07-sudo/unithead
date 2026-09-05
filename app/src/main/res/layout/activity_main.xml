@@ -1,0 +1,16 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:background="#000">
+    <SurfaceView android:id="@+id/videoSurface" android:layout_width="match_parent"
+        android:layout_height="match_parent"/>
+    <LinearLayout android:id="@+id/overlay" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:orientation="vertical"
+        android:padding="16dp" android:background="#AA111111">
+        <TextView android:id="@+id/statusText" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="Menunggu iPhone..."
+            android:textColor="#FFF" android:textSize="20sp"/>
+        <TextView android:id="@+id/ipText" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:textColor="#DDD" android:textSize="17sp"/>
+        <Button android:id="@+id/restartButton" android:layout_width="220dp"
+            android:layout_height="60dp" android:text="RESTART"/>
+    </LinearLayout>
+</FrameLayout>
