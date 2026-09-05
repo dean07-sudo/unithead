@@ -1,6 +1,10 @@
 package com.kemal.headunitmirror
 
-import android.media.*
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.os.Bundle
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -11,7 +15,9 @@ import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import java.io.DataInputStream
-import java.net.*
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.net.ServerSocket
 import java.nio.ByteBuffer
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,8 +39,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         setContentView(R.layout.activity_main)
 
-        // Mencegah layar mati selama aplikasi digunakan.
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Menjaga layar tetap menyala selama Headunit Mirror digunakan.
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
 
         surfaceView = findViewById(R.id.videoSurface)
         status = findViewById(R.id.statusText)
@@ -51,61 +59,73 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         surfaceView.setOnClickListener {
             overlay.visibility =
-                if (overlay.visibility == View.VISIBLE) View.GONE
-                else View.VISIBLE
+                if (overlay.visibility == View.VISIBLE) {
+                    View.GONE
+                } else {
+                    View.VISIBLE
+                }
         }
 
         window.decorView.systemUiVisibility = 5894
     }
 
-    override fun surfaceCreated(h: SurfaceHolder) {
-        surface = h.surface
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        surface = holder.surface
         restart()
     }
 
-    override fun surfaceDestroyed(h: SurfaceHolder) {
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
         receiver?.stop()
         receiver = null
         surface = null
     }
 
     override fun surfaceChanged(
-        h: SurfaceHolder,
-        f: Int,
-        w: Int,
-        hh: Int
+        holder: SurfaceHolder,
+        format: Int,
+        width: Int,
+        height: Int
     ) {
+        // Tidak diperlukan.
     }
 
     private fun restart() {
-        val s = surface ?: return
+        val currentSurface = surface ?: return
 
         receiver?.stop()
 
         receiver = Receiver(
-            port,
-            s
-        ) {
+            port = port,
+            surface = currentSurface
+        ) { message ->
             runOnUiThread {
-                status.text = it
+                status.text = message
             }
         }.also {
             it.start()
         }
     }
 
-    private fun localIp(): String? = try {
-        Collections
-            .list(NetworkInterface.getNetworkInterfaces())
-            .flatMap {
-                Collections.list(it.inetAddresses)
-            }
-            .firstOrNull {
-                !it.isLoopbackAddress && it is Inet4Address
-            }
-            ?.hostAddress
-    } catch (_: Exception) {
-        null
+    private fun localIp(): String? {
+        return try {
+            Collections
+                .list(NetworkInterface.getNetworkInterfaces())
+                .flatMap {
+                    Collections.list(it.inetAddresses)
+                }
+                .firstOrNull {
+                    !it.isLoopbackAddress && it is Inet4Address
+                }
+                ?.hostAddress
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    override fun onDestroy() {
+        receiver?.stop()
+        receiver = null
+        super.onDestroy()
     }
 }
 
@@ -120,9 +140,9 @@ private class Receiver(
     private var thread: Thread? = null
     private var server: ServerSocket? = null
 
-    private var v: MediaCodec? = null
-    private var a: MediaCodec? = null
-    private var track: AudioTrack? = null
+    private var videoDecoder: MediaCodec? = null
+    private var audioDecoder: MediaCodec? = null
+    private var audioTrack: AudioTrack? = null
 
     private var sps: ByteArray? = null
     private var pps: ByteArray? = null
@@ -131,27 +151,34 @@ private class Receiver(
     private var width = 1280
     private var height = 720
 
-    private var vpts = 0L
-    private var apts = 0L
+    private var videoPts = 0L
+    private var audioPts = 0L
 
     fun start() {
-        if (running.getAndSet(true)) return
+        if (running.getAndSet(true)) {
+            return
+        }
 
         thread = Thread {
+
             try {
                 server = ServerSocket(port)
 
                 status("Siap • menunggu iPhone...")
 
                 while (running.get()) {
-                    val socket = server!!.accept()
+
+                    val socket = server?.accept() ?: break
 
                     socket.tcpNoDelay = true
 
                     status("Terhubung • video + audio")
 
                     try {
-                        DataInputStream(socket.getInputStream()).use { input ->
+
+                        DataInputStream(
+                            socket.getInputStream()
+                        ).use { input ->
 
                             while (running.get()) {
 
@@ -162,54 +189,71 @@ private class Receiver(
                                     throw Exception("bad packet")
                                 }
 
-                                val p = ByteArray(len)
+                                val packet = ByteArray(len)
 
-                                input.readFully(p)
+                                input.readFully(packet)
 
                                 when (type) {
 
+                                    // SPS
                                     1 -> {
-                                        sps = p
+                                        sps = packet
                                         configureVideo()
                                     }
 
+                                    // PPS
                                     2 -> {
-                                        pps = p
+                                        pps = packet
                                         configureVideo()
                                     }
 
+                                    // Video
                                     3 -> {
-                                        decodeVideo(p)
+                                        decodeVideo(packet)
                                     }
 
+                                    // Audio configuration
                                     4 -> {
-                                        asc = p
+                                        asc = packet
                                         configureAudio()
                                     }
 
+                                    // Video size
                                     5 -> {
-                                        if (p.size >= 8) {
+                                        if (packet.size >= 8) {
+
                                             width = ByteBuffer
-                                                .wrap(p)
+                                                .wrap(packet)
                                                 .int
 
                                             height = ByteBuffer
-                                                .wrap(p, 4, 4)
+                                                .wrap(
+                                                    packet,
+                                                    4,
+                                                    4
+                                                )
                                                 .int
 
+                                            releaseVideo()
                                             configureVideo()
                                         }
                                     }
 
+                                    // Audio
                                     6 -> {
-                                        decodeAudio(p)
+                                        decodeAudio(packet)
                                     }
                                 }
                             }
                         }
 
                     } catch (_: Exception) {
-                        status("Koneksi putus • menunggu lagi...")
+
+                        if (running.get()) {
+                            status(
+                                "Koneksi putus • menunggu lagi..."
+                            )
+                        }
 
                     } finally {
 
@@ -224,6 +268,9 @@ private class Receiver(
                         sps = null
                         pps = null
                         asc = null
+
+                        videoPts = 0L
+                        audioPts = 0L
                     }
                 }
 
@@ -241,6 +288,7 @@ private class Receiver(
     }
 
     fun stop() {
+
         running.set(false)
 
         try {
@@ -248,7 +296,10 @@ private class Receiver(
         } catch (_: Exception) {
         }
 
+        server = null
+
         thread?.interrupt()
+        thread = null
 
         releaseVideo()
         releaseAudio()
@@ -257,50 +308,71 @@ private class Receiver(
     @Synchronized
     private fun configureVideo() {
 
-        if (v != null || sps == null || pps == null) return
+        if (videoDecoder != null) {
+            return
+        }
+
+        val currentSps = sps ?: return
+        val currentPps = pps ?: return
 
         try {
 
-            val f = MediaFormat.createVideoFormat(
+            val format = MediaFormat.createVideoFormat(
                 "video/avc",
                 width,
                 height
             )
 
-            f.setByteBuffer(
+            format.setByteBuffer(
                 "csd-0",
                 ByteBuffer.wrap(
-                    byteArrayOf(0, 0, 0, 1) + sps!!
+                    byteArrayOf(
+                        0,
+                        0,
+                        0,
+                        1
+                    ) + currentSps
                 )
             )
 
-            f.setByteBuffer(
+            format.setByteBuffer(
                 "csd-1",
                 ByteBuffer.wrap(
-                    byteArrayOf(0, 0, 0, 1) + pps!!
+                    byteArrayOf(
+                        0,
+                        0,
+                        0,
+                        1
+                    ) + currentPps
                 )
             )
 
-            f.setInteger(
+            format.setInteger(
                 MediaFormat.KEY_MAX_INPUT_SIZE,
                 2 * 1024 * 1024
             )
 
-            v = MediaCodec
-                .createDecoderByType("video/avc")
-                .apply {
+            videoDecoder =
+                MediaCodec.createDecoderByType(
+                    "video/avc"
+                ).apply {
+
                     configure(
-                        f,
+                        format,
                         surface,
                         null,
                         0
                     )
+
                     start()
                 }
 
         } catch (e: Exception) {
 
-            status("Video decoder: ${e.message}")
+            status(
+                "Video decoder: ${e.message}"
+            )
+
             releaseVideo()
         }
     }
@@ -308,124 +380,144 @@ private class Receiver(
     @Synchronized
     private fun configureAudio() {
 
-        if (a != null || asc == null) return
+        if (audioDecoder != null) {
+            return
+        }
+
+        val currentAsc = asc ?: return
 
         try {
 
-            val f = MediaFormat.createAudioFormat(
+            val format = MediaFormat.createAudioFormat(
                 "audio/mp4a-latm",
                 44100,
                 2
             )
 
-            f.setByteBuffer(
+            format.setByteBuffer(
                 "csd-0",
-                ByteBuffer.wrap(asc!!)
+                ByteBuffer.wrap(currentAsc)
             )
 
-            f.setInteger(
+            format.setInteger(
                 MediaFormat.KEY_MAX_INPUT_SIZE,
                 256 * 1024
             )
 
-            a = MediaCodec
-                .createDecoderByType("audio/mp4a-latm")
-                .apply {
+            audioDecoder =
+                MediaCodec.createDecoderByType(
+                    "audio/mp4a-latm"
+                ).apply {
+
                     configure(
-                        f,
+                        format,
                         null,
                         null,
                         0
                     )
+
                     start()
                 }
 
-            val min = AudioTrack.getMinBufferSize(
-                44100,
-                AudioFormat.CHANNEL_OUT_STEREO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
+            val minBufferSize =
+                AudioTrack.getMinBufferSize(
+                    44100,
+                    AudioFormat.CHANNEL_OUT_STEREO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
 
-            track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(
-                            AudioAttributes.USAGE_MEDIA
+            audioTrack =
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(
+                                AudioAttributes.USAGE_MEDIA
+                            )
+                            .setContentType(
+                                AudioAttributes.CONTENT_TYPE_MUSIC
+                            )
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setSampleRate(44100)
+                            .setEncoding(
+                                AudioFormat.ENCODING_PCM_16BIT
+                            )
+                            .setChannelMask(
+                                AudioFormat.CHANNEL_OUT_STEREO
+                            )
+                            .build()
+                    )
+                    .setBufferSizeInBytes(
+                        maxOf(
+                            minBufferSize,
+                            32768
                         )
-                        .setContentType(
-                            AudioAttributes.CONTENT_TYPE_MUSIC
-                        )
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(44100)
-                        .setEncoding(
-                            AudioFormat.ENCODING_PCM_16BIT
-                        )
-                        .setChannelMask(
-                            AudioFormat.CHANNEL_OUT_STEREO
-                        )
-                        .build()
-                )
-                .setBufferSizeInBytes(
-                    maxOf(min, 32768)
-                )
-                .build()
+                    )
+                    .build()
 
-            track?.play()
+            audioTrack?.play()
 
         } catch (e: Exception) {
 
-            status("Audio decoder: ${e.message}")
+            status(
+                "Audio decoder: ${e.message}"
+            )
+
             releaseAudio()
         }
     }
 
     private fun decodeVideo(data: ByteArray) {
 
-        val c = v ?: return
+        val decoder = videoDecoder ?: return
 
         try {
 
-            val i = c.dequeueInputBuffer(5000)
+            val inputIndex =
+                decoder.dequeueInputBuffer(5000)
 
-            if (i >= 0) {
+            if (inputIndex >= 0) {
 
-                c.getInputBuffer(i)?.apply {
-                    clear()
-                    put(data)
-                }
+                decoder
+                    .getInputBuffer(inputIndex)
+                    ?.apply {
+                        clear()
+                        put(data)
+                    }
 
-                c.queueInputBuffer(
-                    i,
+                decoder.queueInputBuffer(
+                    inputIndex,
                     0,
                     data.size,
-                    vpts,
+                    videoPts,
                     0
                 )
 
-                vpts += 33333
+                videoPts += 33333
             }
 
             val info = MediaCodec.BufferInfo()
 
-            var o = c.dequeueOutputBuffer(
-                info,
-                0
-            )
-
-            while (o >= 0) {
-
-                c.releaseOutputBuffer(
-                    o,
-                    true
-                )
-
-                o = c.dequeueOutputBuffer(
+            var outputIndex =
+                decoder.dequeueOutputBuffer(
                     info,
                     0
                 )
+
+            while (outputIndex >= 0) {
+
+                decoder.releaseOutputBuffer(
+                    outputIndex,
+                    true
+                )
+
+                outputIndex =
+                    decoder.dequeueOutputBuffer(
+                        info,
+                        0
+                    )
             }
 
         } catch (_: Exception) {
@@ -434,65 +526,77 @@ private class Receiver(
 
     private fun decodeAudio(data: ByteArray) {
 
-        val c = a ?: return
+        val decoder = audioDecoder ?: return
 
         try {
 
-            val i = c.dequeueInputBuffer(5000)
+            val inputIndex =
+                decoder.dequeueInputBuffer(5000)
 
-            if (i >= 0) {
+            if (inputIndex >= 0) {
 
-                c.getInputBuffer(i)?.apply {
-                    clear()
-                    put(data)
-                }
+                decoder
+                    .getInputBuffer(inputIndex)
+                    ?.apply {
+                        clear()
+                        put(data)
+                    }
 
-                c.queueInputBuffer(
-                    i,
+                decoder.queueInputBuffer(
+                    inputIndex,
                     0,
                     data.size,
-                    apts,
+                    audioPts,
                     0
                 )
 
-                apts += 23220
+                audioPts += 23220
             }
 
             val info = MediaCodec.BufferInfo()
 
-            var o = c.dequeueOutputBuffer(
-                info,
-                0
-            )
+            var outputIndex =
+                decoder.dequeueOutputBuffer(
+                    info,
+                    0
+                )
 
-            while (o >= 0) {
+            while (outputIndex >= 0) {
 
-                val b = c.getOutputBuffer(o)
+                val buffer =
+                    decoder.getOutputBuffer(
+                        outputIndex
+                    )
 
-                if (b != null && info.size > 0) {
+                if (
+                    buffer != null &&
+                    info.size > 0
+                ) {
 
-                    b.position(info.offset)
+                    buffer.position(info.offset)
 
-                    val pcm = ByteArray(info.size)
+                    val pcm =
+                        ByteArray(info.size)
 
-                    b.get(pcm)
+                    buffer.get(pcm)
 
-                    track?.write(
+                    audioTrack?.write(
                         pcm,
                         0,
                         pcm.size
                     )
                 }
 
-                c.releaseOutputBuffer(
-                    o,
+                decoder.releaseOutputBuffer(
+                    outputIndex,
                     false
                 )
 
-                o = c.dequeueOutputBuffer(
-                    info,
-                    0
-                )
+                outputIndex =
+                    decoder.dequeueOutputBuffer(
+                        info,
+                        0
+                    )
             }
 
         } catch (_: Exception) {
@@ -503,43 +607,43 @@ private class Receiver(
     private fun releaseVideo() {
 
         try {
-            v?.stop()
+            videoDecoder?.stop()
         } catch (_: Exception) {
         }
 
         try {
-            v?.release()
+            videoDecoder?.release()
         } catch (_: Exception) {
         }
 
-        v = null
+        videoDecoder = null
     }
 
     @Synchronized
     private fun releaseAudio() {
 
         try {
-            a?.stop()
+            audioDecoder?.stop()
         } catch (_: Exception) {
         }
 
         try {
-            a?.release()
+            audioDecoder?.release()
         } catch (_: Exception) {
         }
 
-        a = null
+        audioDecoder = null
 
         try {
-            track?.stop()
+            audioTrack?.stop()
         } catch (_: Exception) {
         }
 
         try {
-            track?.release()
+            audioTrack?.release()
         } catch (_: Exception) {
         }
 
-        track = null
+        audioTrack = null
     }
 }
